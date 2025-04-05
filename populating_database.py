@@ -86,12 +86,12 @@ def save_apps_to_db():
 
     
 def detect_applied_updates():
-    print("\n🔍 Checking if any pending updates have been applied...")
+    print("\nChecking if any pending updates have been applied...")
 
     # Step 1: Get currently installed apps using winget list
     result = subprocess.run(["winget", "list"], capture_output=True, text=True)
     if result.returncode != 0:
-        print("❌ Failed to run 'winget list'")
+        print("Failed to run 'winget list'")
         return
 
     installed_apps = {}
@@ -116,9 +116,9 @@ def detect_applied_updates():
             patch.status = "success"
             patch.installed_on = datetime.utcnow()
             session.commit()
-            print(f"✅ {app.app_name} updated to {installed_version} — history marked as success")
+            print(f"{app.app_name} updated to {installed_version} — history marked as success")
         else:
-            print(f"⏳ {app.app_name} not updated yet (installed: {installed_version}, expected: {patch.patch_version})")
+            print(f"{app.app_name} not updated yet (installed: {installed_version}, expected: {patch.patch_version})")
 
 
 if __name__ == "__main__":

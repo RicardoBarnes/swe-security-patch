@@ -175,28 +175,49 @@ def sync_to_database(installed_apps, winget_upgrades):
     session.commit()
 
 # --- Run Script ---
-if __name__ == "__main__":
+# if __name__ == "__main__":
+#     os_type = detect_os()
+
+#     if os_type == "windows":
+#         print("[*] Scanning installed apps from registry...")
+#         apps = get_installed_apps_from_registry()
+#         print("[*] Checking winget for available upgrades...")
+#         upgrades = get_winget_upgrades()
+#     elif os_type == "mac":
+#         print("[*] Scanning installed apps on macOS...")
+#         apps = get_installed_apps_mac()
+#         print("[*] Checking Homebrew for available upgrades...")
+#         upgrades = get_brew_upgrades()
+#     elif os_type == "linux":
+#         print("[*] Scanning installed apps on Linux...")
+#         apps = get_installed_apps_linux()
+#         print("[*] Checking apt for available upgrades...")
+#         upgrades = get_apt_upgrades()
+#     else:
+#         print("Unsupported OS")
+#         apps, upgrades = {}, {}
+
+#     sync_to_database(apps, upgrades)
+
+#     print("[*] Syncing to database...")
+#     sync_to_database(apps, upgrades)
+#     print("[✔] Done!")
+
+def detect_and_sync():
     os_type = detect_os()
 
     if os_type == "windows":
-        print("[*] Scanning installed apps from registry...")
         apps = get_installed_apps_from_registry()
-        print("[*] Checking winget for available upgrades...")
         upgrades = get_winget_upgrades()
     elif os_type == "mac":
-        print("[*] Scanning installed apps on macOS...")
         apps = get_installed_apps_mac()
-        print("[*] Checking Homebrew for available upgrades...")
         upgrades = get_brew_upgrades()
     elif os_type == "linux":
-        print("[*] Scanning installed apps on Linux...")
         apps = get_installed_apps_linux()
-        print("[*] Checking apt for available upgrades...")
         upgrades = get_apt_upgrades()
     else:
         print("Unsupported OS")
         apps, upgrades = {}, {}
 
-    print("[*] Syncing to database...")
     sync_to_database(apps, upgrades)
-    print("[✔] Done!")
+

@@ -1,11 +1,12 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi import APIRouter
 import crud
 from sqlalchemy.orm import Session
 from models import Session as DBSession 
 import subprocess
 from models import Session as DBSession, Application, PatchHistory
 
-app=FastAPI()
+app= APIRouter()
 
 
 # creating session function to avoid session issues

@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from api import app as api_router 
+from api import router as api_router 
 from models import Base, engine
 import crud
 from new_database_population import detect_and_sync 

@@ -9,7 +9,7 @@ from auth import authenticate_user, create_access_token, get_current_admin
 from fastapi.security import OAuth2PasswordRequestForm
 
 
-app= APIRouter()
+router= APIRouter()
 
 
 # creating session function to avoid session issues
@@ -21,25 +21,25 @@ def get_db():
         db.close()
 # --------------------------------------------------------------------------------------------------------
 # home page
-@app.get("/")
+@router.get("/")
 def homepage():
     return "PATCH MANAGEMENT DASHBOARD"
 
-@app.get("/admin-dashboard")
+@router.get("/admin-dashboard")
 def admin_dashboard(user: User = Depends(get_current_admin)):
     return {"message": "Welcome to the admin dashboard", "user": user.username}
 
 # all apps
-@app.get("/applications")
+@router.get("/applications")
 def list_applications(db: Session = Depends(get_db)):
     return crud.get_all_apps(db)
 
 # patch info for specific app
-@app.get("/patches/{app_id}")
+@router.get("/patches/{app_id}")
 def show_patch_info(app_id: int, db: Session = Depends(get_db) ):
     return crud.get_patch_info(db, app_id)
 
-@app.post("/scan")
+@router.post("/scan")
 def manual_scan(db: Session = Depends(get_db), user: User = Depends(get_current_admin)):
     from new_database_population import detect_and_sync  
     try:
@@ -48,7 +48,7 @@ def manual_scan(db: Session = Depends(get_db), user: User = Depends(get_current_
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/update/{app_id}")
+@router.post("/update/{app_id}")
 def update_application(app_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_admin)):
     app = db.query(Application).filter(Application.app_id == app_id).first()
     if not app:
@@ -66,7 +66,7 @@ def update_application(app_id: int, db: Session = Depends(get_db), user: User = 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upgrade app: {str(e)}")
 
-@app.post("/login")
+@router.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:

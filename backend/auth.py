@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from models import User, Session as DBSession
 
 # Secret key & algorithm
-SECRET_KEY = "your_super_secret_key_here"
+SECRET_KEY = "Patch Project"
 ALGORITHM = "HS256"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

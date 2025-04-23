@@ -5,6 +5,7 @@ import enum
 from datetime import datetime
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Boolean
 
 Base = declarative_base()
 
@@ -34,6 +35,17 @@ class PatchHistory(Base):
     status = Column(String(20))  # "success", "failed", etc.
 
     application = relationship("Application", back_populates="patch_history")
+
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    is_admin = Column(Boolean, default=False)
+
 
 
 Application.patch_history = relationship("PatchHistory", back_populates="application")

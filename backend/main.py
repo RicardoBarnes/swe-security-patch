@@ -7,7 +7,7 @@ from new_database_population import detect_and_sync
 app = FastAPI()
 
 
-app.include_router(api_router)  
+app.include_router(api_router, prefix="")  
 
 Base.metadata.create_all(engine)
 

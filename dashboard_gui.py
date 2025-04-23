@@ -3,43 +3,105 @@ import sys
 import requests
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QPushButton, QVBoxLayout, QMessageBox,
-    QLabel, QLineEdit, QTextEdit, QHBoxLayout
+    QLabel, QLineEdit, QTextEdit, QHBoxLayout, QGroupBox, QMainWindow, QStackedWidget
 )
+from PyQt6.QtCore import Qt
+from styles import global_qss 
+from PyQt6.QtGui import QPixmap, QIcon
+
 
 API_BASE = "http://localhost:8000"  
 
-class Dashboard(QWidget):
+
+
+import requests
+from PyQt6.QtWidgets import (
+    QWidget, QPushButton, QVBoxLayout, QLabel, QLineEdit, QGroupBox
+)
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon, QPixmap
+from styles import global_qss  # Assuming this is where your global_qss function is
+
+API_BASE = "http://localhost:8000"  # Your API base URL
+
+class LoginPage(QWidget):
+    def __init__(self, stacked_widget, parent=None):
+        super().__init__(parent)
+        self.stacked_widget = stacked_widget 
+        self.setWindowTitle("🛡️ Login Page")
+        self.setWindowIcon(QIcon("Patch Image.jpg"))
+        self.setGeometry(100, 100, 400, 300)
+        
+        # Set the global stylesheet
+        self.setStyleSheet(global_qss())  # Calling global_qss directly
+
+        # Layout setup
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(15)
+
+        # Logo
+        logo_lbl = QLabel()
+        pixmap = QPixmap("resources/logo.png")
+        logo_lbl.setPixmap(pixmap.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(logo_lbl)
+
+        # Login Section
+        login_box = QGroupBox("🔒 Login")
+        login_layout = QVBoxLayout()
+        self.user_input = QLineEdit()
+        self.user_input.setPlaceholderText("Username")
+        self.pw_input = QLineEdit()
+        self.pw_input.setPlaceholderText("Password")
+        self.pw_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.login_btn = QPushButton("Login")
+        self.login_btn.clicked.connect(self.login_user)
+        login_layout.addWidget(self.user_input)
+        login_layout.addWidget(self.pw_input)
+        login_layout.addWidget(self.login_btn)
+        login_box.setLayout(login_layout)
+
+        layout.addWidget(login_box)
+
+    def login_user(self):
+        username = self.user_input.text()
+        password = self.pw_input.text()
+
+        # Check username/password with backend API
+        response = requests.post(f"{API_BASE}/login", data={"username": username, "password": password})
+
+        if response.status_code == 200:
+            print("Login successful. Redirecting to dashboard...")
+            self.stacked_widget.setCurrentIndex(1)  # ✅ Now works
+        else:
+            print("Login failed. Check credentials.")
+
+
+class DashboardPage(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Patch Management Dashboard")
-        self.setGeometry(200, 200, 500, 400)
+        self.setGeometry(100, 100, 900, 600)
+        self.setStyleSheet(global_qss())
+        self.token = None 
         
-        self.token = None
-        layout = QVBoxLayout()
 
-        # Login Section
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Username")
-        self.password_input = QLineEdit()
-        self.password_input.setPlaceholderText("Password")
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.login_button = QPushButton("Login")
-        self.login_button.clicked.connect(self.login_user)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(15)
 
-        layout.addWidget(QLabel("Login"))
-        layout.addWidget(self.username_input)
-        layout.addWidget(self.password_input)
-        layout.addWidget(self.login_button)
+        
 
         # Manual Scan Button
         self.scan_button = QPushButton("Run Manual Scan")
         self.scan_button.clicked.connect(self.run_scan)
-        layout.addWidget(self.scan_button)
+        main_layout.addWidget(self.scan_button)
 
         # Get All Applications Button
         self.get_apps_button = QPushButton("Get All Applications")
         self.get_apps_button.clicked.connect(self.get_applications)
-        layout.addWidget(self.get_apps_button)
+        main_layout.addWidget(self.get_apps_button)
 
         # Get Patches for App
         patch_layout = QHBoxLayout()
@@ -49,7 +111,7 @@ class Dashboard(QWidget):
         self.get_patches_button.clicked.connect(self.get_patches)
         patch_layout.addWidget(self.app_id_input)
         patch_layout.addWidget(self.get_patches_button)
-        layout.addLayout(patch_layout)
+        main_layout.addLayout(patch_layout)
 
         # Update App by ID
         update_layout = QHBoxLayout()
@@ -59,14 +121,36 @@ class Dashboard(QWidget):
         self.update_button.clicked.connect(self.update_application)
         update_layout.addWidget(self.update_id_input)
         update_layout.addWidget(self.update_button)
-        layout.addLayout(update_layout)
+        main_layout.addLayout(update_layout)
 
         # Output Display
         self.output_box = QTextEdit()
         self.output_box.setReadOnly(True)
-        layout.addWidget(self.output_box)
+        main_layout.addWidget(self.output_box)
 
-        self.setLayout(layout)
+        self.setLayout(main_layout)
+
+        logo_lbl = QLabel()
+        pixmap = QPixmap("resources/logo.png")
+        logo_lbl.setPixmap(pixmap.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        logo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(logo_lbl)
+
+        # Controls GroupBox
+        control_box = QGroupBox("⚙️ Controls")
+        ctrl_layout = QVBoxLayout()
+        self.scan_btn = QPushButton("Run Manual Scan")
+        self.get_apps_btn = QPushButton("Get All Applications")
+        self.get_patches_btn = QPushButton("Get Patches for ID")
+        self.update_btn = QPushButton("Update Application")
+        # connect your slots here...
+        ctrl_layout.addWidget(self.scan_btn)
+        ctrl_layout.addWidget(self.get_apps_btn)
+        ctrl_layout.addWidget(self.get_patches_btn)
+        ctrl_layout.addWidget(self.update_btn)
+        control_box.setLayout(ctrl_layout)
+
+        main_layout.addWidget(control_box)
 
     def login_user(self):
         username = self.username_input.text()
@@ -134,10 +218,29 @@ class Dashboard(QWidget):
 
     def show_error(self, error):
         self.output_box.setPlainText(f"Request failed: {str(error)}")
+    
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Patch Management Dashboard")
+        self.setGeometry(100, 100, 900, 600)
+
+        # Create QStackedWidget to switch between login and dashboard pages
+        self.stacked_widget = QStackedWidget(self)
+        self.setCentralWidget(self.stacked_widget)
+
+        # Create both pages
+        self.login_page = LoginPage(self.stacked_widget)
+        self.dashboard_page = DashboardPage()
+
+        # Add pages to stacked widget
+        self.stacked_widget.addWidget(self.login_page)
+        self.stacked_widget.addWidget(self.dashboard_page)
 
 
 if __name__ == "__main__":
+    import sys
     app = QApplication(sys.argv)
-    window = Dashboard()
+    window = MainWindow()
     window.show()
     sys.exit(app.exec())

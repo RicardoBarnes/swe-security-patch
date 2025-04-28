@@ -20,7 +20,7 @@ class Application(Base):
     package_identifier = Column(String(255), nullable=False)
     current_version = Column(String(50))
     available_update = Column(String(50))
-    last_checked = last_checked = Column(DateTime, default=datetime.utcnow)
+    last_checked = Column(DateTime, default=datetime.utcnow)
 
 
 
@@ -45,7 +45,18 @@ class User(Base):
     username = Column(String(50), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     is_admin = Column(Boolean, default=False)
+    devices = relationship("Device", back_populates="user")
 
+class Device(Base):
+    __tablename__ = "devices"
+    id = Column(Integer, primary_key=True, index=True)
+    hostname = Column(String(255), nullable=False)
+    ip_address = Column(String(255), nullable=False)
+    ssh_username = Column(String(255), nullable=False)
+    ssh_password = Column(String(255), nullable=True)  #i wanna do passwords not keys
+    
+    user_id = Column(Integer, ForeignKey("users.id"))
+    user = relationship("User", back_populates="devices")
 
 
 Application.patch_history = relationship("PatchHistory", back_populates="application")

@@ -4,6 +4,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from models import User, Session as DBSession
+import bcrypt
 
 # Secret key & algorithm
 SECRET_KEY = "Patch Project"
@@ -18,6 +19,24 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def register_user(db: Session, username: str, password: str):
+    user = db.query(User).filter(User.username == username).first()
+    if user:
+        raise Exception("Username already exists.")
+
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    new_user = User(
+        username=username,
+         hashed_password=hashed_password,
+        is_admin=True  # Automatically make them admin
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return new_user
 
 def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)

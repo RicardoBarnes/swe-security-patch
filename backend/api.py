@@ -9,14 +9,17 @@ from auth import authenticate_user, create_access_token, get_current_admin
 from fastapi.security import OAuth2PasswordRequestForm
 from auth import register_user, get_current_user
 from schemas import UserSignup
-import models
 from datetime import datetime
 from ssh_utils import SSHManager
-from typing import List
+from typing import List, Dict
+from pathlib import Path
+import paramiko
+import logging
 
 
 router= APIRouter()
 
+logger = logging.getLogger(__name__)
 
 # creating session function to avoid session issues
 def get_db():
@@ -25,6 +28,26 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def get_scan_commands():
+    """Returns the OS-specific scan commands and handlers"""
+    return {
+        "windows": {
+            "command": "winget upgrade || choco outdated || echo No package manager available",
+            "handler": lambda ssh, cmd: ssh.execute_windows_command(cmd)
+        },
+        "linux": {
+            "command": ("apt list --upgradable 2>/dev/null || " +
+                       "yum list updates 2>/dev/null || " +
+                       "dnf check-update 2>/dev/null || " +
+                       "echo No supported package manager found"),
+            "handler": lambda ssh, cmd: ssh.execute_command(cmd)
+        },
+        "mac": {
+            "command": "brew outdated --verbose 2>/dev/null || echo Brew not available",
+            "handler": lambda ssh, cmd: ssh.execute_command(cmd)
+        }
+    }
 # --------------------------------------------------------------------------------------------------------
 # home page
 @router.get("/")
@@ -119,23 +142,122 @@ def run_remote_command(
 
 
 @router.post("/devices/{device_id}/scan")
-def scan_remote_device(
+def run_remote_scan(
     device_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin)
+    current_user: User = Depends(get_current_user)
 ):
-    """Trigger remote scan on specific device"""
+    """Run a scan on a remote device"""
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
+    if device.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     ssh = SSHManager(device)
-    result = ssh.transfer_and_execute("./scripts/remote_scanner.py")
     
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
+    try:
+        # Test connection first
+        connection_test = ssh.execute_command("echo Connection test")
+        if "error" in connection_test:
+            raise HTTPException(
+                status_code=500,
+                detail=f"SSH connection failed: {connection_test['error']}"
+            )
+
+        # Detect OS (using the simplified method)
+        remote_os = ssh.detect_os()
+        if not remote_os:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not detect OS after multiple attempts"
+            )
+
+        # Get appropriate scan command
+        scan_commands = {
+            "windows": {
+            "command": (
+                "powershell -Command \""
+                "$output = ''; "
+                "if (Get-Command winget -ErrorAction SilentlyContinue) { "
+                "    $wingetOut = winget upgrade | Out-String; "
+                "    $output += \"Winget results:\n$wingetOut\n\"; "
+                "    if ($wingetOut -match 'No installed packages found matching input criteria') { "
+                "        $output += 'No updates available via winget\n' "
+                "    }"
+                "} else { $output += 'Winget not installed\n' }; "
+                "if (Get-Command choco -ErrorAction SilentlyContinue) { "
+                "    $chocoOut = choco outdated | Out-String; "
+                "    $output += \"Chocolatey results:\n$chocoOut\n\"; "
+                "    if ($chocoOut -match 'There are no outdated packages') { "
+                "        $output += 'No updates available via chocolatey\n' "
+                "    }"
+                "} else { $output += 'Chocolatey not installed\n' }; "
+                "if (-not $output) { $output = 'No package managers found' }; "
+                "$output\""
+            ),
+            "handler": lambda cmd: ssh.execute_windows_command(cmd)
+            },
     
-    return {"status": "success", "result": result["output"]}
+            "linux": {
+                "command": ("apt list --upgradable 2>/dev/null || " +
+                          "yum list updates 2>/dev/null || " +
+                          "dnf check-update 2>/dev/null || " +
+                          "echo No supported package manager found"),
+                "handler": lambda cmd: ssh.execute_command(cmd)
+            },
+            "mac": {
+                "command": "brew outdated --verbose 2>/dev/null || echo Brew not available",
+                "handler": lambda cmd: ssh.execute_command(cmd)
+            }
+        }
+
+        scan_config = scan_commands.get(remote_os.lower())  # Now safe to call lower()
+        if not scan_config:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported OS: {remote_os}"
+            )
+
+        # Execute scan
+        scan_result = scan_config["handler"](scan_config["command"])
+        if "error" in scan_result:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Scan command failed",
+                    "error": scan_result["error"],
+                    "command": scan_config["command"],
+                    "os": remote_os
+                }
+            )
+
+        return {
+            "status": "success",
+            "os": remote_os,
+            "scan_results": scan_result["output"],
+            "device_info": {
+                "id": device.id,
+                "hostname": device.hostname
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Unexpected error during scan",
+                "error": str(e),
+                "debug_suggestions": [
+                    "Check SSH credentials in database",
+                    "Verify network connectivity to device",
+                    "Test manual SSH connection with: ssh username@host"
+                ]
+            }
+        )
 
 @router.post("/devices/{device_id}/update/{app_id}")
 def update_remote_application(

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import Depends, HTTPException
 from fastapi import APIRouter
 import crud
 from sqlalchemy.orm import Session
@@ -9,13 +9,17 @@ from auth import authenticate_user, create_access_token, get_current_admin
 from fastapi.security import OAuth2PasswordRequestForm
 from auth import register_user, get_current_user
 from schemas import UserSignup
-import models
-from ssh_utils import ssh_connect_and_run
-from typing import List
+from datetime import datetime
+from ssh_utils import SSHManager
+from typing import List, Dict
+from pathlib import Path
+import paramiko
+import logging
 
 
 router= APIRouter()
 
+logger = logging.getLogger(__name__)
 
 # creating session function to avoid session issues
 def get_db():
@@ -24,12 +28,33 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def get_scan_commands():
+    """Returns the OS-specific scan commands and handlers"""
+    return {
+        "windows": {
+            "command": "winget upgrade || choco outdated || echo No package manager available",
+            "handler": lambda ssh, cmd: ssh.execute_windows_command(cmd)
+        },
+        "linux": {
+            "command": ("apt list --upgradable 2>/dev/null || " +
+                       "yum list updates 2>/dev/null || " +
+                       "dnf check-update 2>/dev/null || " +
+                       "echo No supported package manager found"),
+            "handler": lambda ssh, cmd: ssh.execute_command(cmd)
+        },
+        "mac": {
+            "command": "brew outdated --verbose 2>/dev/null || echo Brew not available",
+            "handler": lambda ssh, cmd: ssh.execute_command(cmd)
+        }
+    }
 # --------------------------------------------------------------------------------------------------------
 # home page
 @router.get("/")
 def homepage():
     return "PATCH MANAGEMENT DASHBOARD"
 
+# ---------------------Applications Routes------------------------
 @router.get("/admin-dashboard")
 def admin_dashboard(user: User = Depends(get_current_admin)):
     return {"message": "Welcome to the admin dashboard", "user": user.username}
@@ -70,6 +95,9 @@ def update_application(app_id: int, db: Session = Depends(get_db), user: User = 
             return {"status": "failed", "error": result.stderr}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upgrade app: {str(e)}")
+    
+
+# --------------------------------------------------User Routes----------------------------------------------------------------------------------------
 
 @router.post("/signup") 
 def signup(user: UserSignup, db: Session = Depends(get_db)):
@@ -88,36 +116,189 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     token = create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-
-@router.post("/run_command_on_device/")
-def run_command_on_device(device_id: int, command: str, db: Session = Depends(get_db)):
-    # Fetch the device from the database
-    device = db.query(models.Device).filter(models.Device.id == device_id).first()
-
+# --------------------------------------------------------------Device Routes------------------------------------------------------------------------
+@router.post("/devices/{device_id}/run-command")
+def run_remote_command(
+    device_id: int,
+    command: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Run arbitrary command on remote device (admin only)"""
+    device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
-        raise HTTPException(status_code=404, detail="Device not found.")
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    
+    ssh = SSHManager(device)
+    result = ssh.execute_command(command)
+    
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    
+    return {"status": "success", "result": result["output"]}
 
-    # Ensure the current user has access to this device
-    # current_user = db.query(models.User).filter(models.User.id == device.user_id).first()
 
-    # if not current_user:
-    #     raise HTTPException(status_code=403, detail="You do not have permission to access this device.")
+@router.post("/devices/{device_id}/scan")
+def run_remote_scan(
+    device_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Run a scan on a remote device"""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    if device.user_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    # Run the command on the remote device via SSH
-    result = ssh_connect_and_run(
-        device.ip_address, 
-        device.ssh_username, 
-        device.ssh_password, 
-        command  
-    )
+    ssh = SSHManager(device)
+    
+    try:
+        # Test connection first
+        connection_test = ssh.execute_command("echo Connection test")
+        if "error" in connection_test:
+            raise HTTPException(
+                status_code=500,
+                detail=f"SSH connection failed: {connection_test['error']}"
+            )
 
-    # Return the result from the SSH command execution
-    if 'output' in result:
-        return {"message": "Command executed successfully.", "output": result['output']}
-    if 'error' in result:
-        raise HTTPException(status_code=500, detail=f"Command execution failed: {result['error']}")
-    return {"message": result.get('message', 'Unknown status')}
+        # Detect OS (using the simplified method)
+        remote_os = ssh.detect_os()
+        if not remote_os:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not detect OS after multiple attempts"
+            )
 
+        # Get appropriate scan command
+        scan_commands = {
+            "windows": {
+            "command": (
+                "powershell -Command \""
+                "$output = ''; "
+                "if (Get-Command winget -ErrorAction SilentlyContinue) { "
+                "    $wingetOut = winget upgrade | Out-String; "
+                "    $output += \"Winget results:\n$wingetOut\n\"; "
+                "    if ($wingetOut -match 'No installed packages found matching input criteria') { "
+                "        $output += 'No updates available via winget\n' "
+                "    }"
+                "} else { $output += 'Winget not installed\n' }; "
+                "if (Get-Command choco -ErrorAction SilentlyContinue) { "
+                "    $chocoOut = choco outdated | Out-String; "
+                "    $output += \"Chocolatey results:\n$chocoOut\n\"; "
+                "    if ($chocoOut -match 'There are no outdated packages') { "
+                "        $output += 'No updates available via chocolatey\n' "
+                "    }"
+                "} else { $output += 'Chocolatey not installed\n' }; "
+                "if (-not $output) { $output = 'No package managers found' }; "
+                "$output\""
+            ),
+            "handler": lambda cmd: ssh.execute_windows_command(cmd)
+            },
+    
+            "linux": {
+                "command": ("apt list --upgradable 2>/dev/null || " +
+                          "yum list updates 2>/dev/null || " +
+                          "dnf check-update 2>/dev/null || " +
+                          "echo No supported package manager found"),
+                "handler": lambda cmd: ssh.execute_command(cmd)
+            },
+            "mac": {
+                "command": "brew outdated --verbose 2>/dev/null || echo Brew not available",
+                "handler": lambda cmd: ssh.execute_command(cmd)
+            }
+        }
+
+        scan_config = scan_commands.get(remote_os.lower())  # Now safe to call lower()
+        if not scan_config:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported OS: {remote_os}"
+            )
+
+        # Execute scan
+        scan_result = scan_config["handler"](scan_config["command"])
+        if "error" in scan_result:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Scan command failed",
+                    "error": scan_result["error"],
+                    "command": scan_config["command"],
+                    "os": remote_os
+                }
+            )
+
+        return {
+            "status": "success",
+            "os": remote_os,
+            "scan_results": scan_result["output"],
+            "device_info": {
+                "id": device.id,
+                "hostname": device.hostname
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Unexpected error during scan",
+                "error": str(e),
+                "debug_suggestions": [
+                    "Check SSH credentials in database",
+                    "Verify network connectivity to device",
+                    "Test manual SSH connection with: ssh username@host"
+                ]
+            }
+        )
+
+@router.post("/devices/{device_id}/update/{app_id}")
+def update_remote_application(
+    device_id: int,
+    app_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """Update application on remote device"""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    app = db.query(Application).filter(Application.app_id == app_id).first()
+    
+    if not device or not app:
+        raise HTTPException(status_code=404, detail="Device or app not found")
+    
+    ssh = SSHManager(device)
+    
+    # Platform-specific update commands
+    update_commands = {
+        "windows": f"winget upgrade --id {app.package_identifier} --silent",
+        "linux": f"sudo apt install --only-upgrade {app.package_identifier} -y",
+        "mac": f"brew upgrade {app.package_identifier}"
+    }
+    
+    # Detect remote OS
+    os_result = ssh.execute_command("python3 -c 'import platform; print(platform.system().lower())'")
+    if "error" in os_result:
+        raise HTTPException(status_code=500, detail=f"OS detection failed: {os_result['error']}")
+    
+    remote_os = os_result["output"].strip()
+    if remote_os not in update_commands:
+        raise HTTPException(status_code=400, detail=f"Unsupported OS: {remote_os}")
+    
+    # Execute update (no history recording)
+    update_result = ssh.execute_command(update_commands[remote_os])
+    if "error" in update_result:
+        raise HTTPException(status_code=500, detail=update_result["error"])
+    
+    return {"status": "success", "output": update_result["output"]}
+
+# -------------------------------------------Device and DB logic routes------------------------------
 # adds device to db
 @router.post("/devices/add")
 def add_device(
@@ -155,34 +336,7 @@ def list_devices(db: Session = Depends(get_db)):
         for device in devices
     ]
 
-# Remote Execution
-@router.post("/devices/{device_id}/run")
-def run_remote_command(
-    device_id: int,
-    command: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Run a command on a remote device."""
-    device = db.query(Device).filter(Device.id == device_id).first()
-    
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found.")
-    
-    # Verify useer is admin
-    if device.user_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Access denied.")
-    
-    result = ssh_connect_and_run(
-        device=device,
-        command=command,
-        script_path="./new_database_population.py"  # path to script
-    )
-    
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    
-    return {"result": result}
+
 
 
 

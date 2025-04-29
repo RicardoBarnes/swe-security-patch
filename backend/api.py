@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import Depends, HTTPException
 from fastapi import APIRouter
 import crud
 from sqlalchemy.orm import Session
@@ -10,7 +10,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from auth import register_user, get_current_user
 from schemas import UserSignup
 import models
-from ssh_utils import ssh_connect_and_run
+from datetime import datetime
+from ssh_utils import SSHManager
 from typing import List
 
 
@@ -30,6 +31,7 @@ def get_db():
 def homepage():
     return "PATCH MANAGEMENT DASHBOARD"
 
+# ---------------------Applications Routes------------------------
 @router.get("/admin-dashboard")
 def admin_dashboard(user: User = Depends(get_current_admin)):
     return {"message": "Welcome to the admin dashboard", "user": user.username}
@@ -70,6 +72,9 @@ def update_application(app_id: int, db: Session = Depends(get_db), user: User = 
             return {"status": "failed", "error": result.stderr}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upgrade app: {str(e)}")
+    
+
+# --------------------------------------------------User Routes----------------------------------------------------------------------------------------
 
 @router.post("/signup") 
 def signup(user: UserSignup, db: Session = Depends(get_db)):
@@ -88,36 +93,90 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     token = create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-
-@router.post("/run_command_on_device/")
-def run_command_on_device(device_id: int, command: str, db: Session = Depends(get_db)):
-    # Fetch the device from the database
-    device = db.query(models.Device).filter(models.Device.id == device_id).first()
-
+# --------------------------------------------------------------Device Routes------------------------------------------------------------------------
+@router.post("/devices/{device_id}/run-command")
+def run_remote_command(
+    device_id: int,
+    command: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Run arbitrary command on remote device (admin only)"""
+    device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
-        raise HTTPException(status_code=404, detail="Device not found.")
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    
+    ssh = SSHManager(device)
+    result = ssh.execute_command(command)
+    
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    
+    return {"status": "success", "result": result["output"]}
 
-    # Ensure the current user has access to this device
-    # current_user = db.query(models.User).filter(models.User.id == device.user_id).first()
 
-    # if not current_user:
-    #     raise HTTPException(status_code=403, detail="You do not have permission to access this device.")
+@router.post("/devices/{device_id}/scan")
+def scan_remote_device(
+    device_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """Trigger remote scan on specific device"""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    
+    ssh = SSHManager(device)
+    result = ssh.transfer_and_execute("./scripts/remote_scanner.py")
+    
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    
+    return {"status": "success", "result": result["output"]}
 
-    # Run the command on the remote device via SSH
-    result = ssh_connect_and_run(
-        device.ip_address, 
-        device.ssh_username, 
-        device.ssh_password, 
-        command  
-    )
+@router.post("/devices/{device_id}/update/{app_id}")
+def update_remote_application(
+    device_id: int,
+    app_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_admin)
+):
+    """Update application on remote device"""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    app = db.query(Application).filter(Application.app_id == app_id).first()
+    
+    if not device or not app:
+        raise HTTPException(status_code=404, detail="Device or app not found")
+    
+    ssh = SSHManager(device)
+    
+    # Platform-specific update commands
+    update_commands = {
+        "windows": f"winget upgrade --id {app.package_identifier} --silent",
+        "linux": f"sudo apt install --only-upgrade {app.package_identifier} -y",
+        "mac": f"brew upgrade {app.package_identifier}"
+    }
+    
+    # Detect remote OS
+    os_result = ssh.execute_command("python3 -c 'import platform; print(platform.system().lower())'")
+    if "error" in os_result:
+        raise HTTPException(status_code=500, detail=f"OS detection failed: {os_result['error']}")
+    
+    remote_os = os_result["output"].strip()
+    if remote_os not in update_commands:
+        raise HTTPException(status_code=400, detail=f"Unsupported OS: {remote_os}")
+    
+    # Execute update (no history recording)
+    update_result = ssh.execute_command(update_commands[remote_os])
+    if "error" in update_result:
+        raise HTTPException(status_code=500, detail=update_result["error"])
+    
+    return {"status": "success", "output": update_result["output"]}
 
-    # Return the result from the SSH command execution
-    if 'output' in result:
-        return {"message": "Command executed successfully.", "output": result['output']}
-    if 'error' in result:
-        raise HTTPException(status_code=500, detail=f"Command execution failed: {result['error']}")
-    return {"message": result.get('message', 'Unknown status')}
-
+# -------------------------------------------Device and DB logic routes------------------------------
 # adds device to db
 @router.post("/devices/add")
 def add_device(
@@ -155,34 +214,7 @@ def list_devices(db: Session = Depends(get_db)):
         for device in devices
     ]
 
-# Remote Execution
-@router.post("/devices/{device_id}/run")
-def run_remote_command(
-    device_id: int,
-    command: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Run a command on a remote device."""
-    device = db.query(Device).filter(Device.id == device_id).first()
-    
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found.")
-    
-    # Verify useer is admin
-    if device.user_id != current_user.id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Access denied.")
-    
-    result = ssh_connect_and_run(
-        device=device,
-        command=command,
-        script_path="./new_database_population.py"  # path to script
-    )
-    
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    
-    return {"result": result}
+
 
 
 

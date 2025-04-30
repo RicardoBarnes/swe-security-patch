@@ -4,10 +4,6 @@ A centralized patch management tool designed to monitor installed applications, 
 
 
 
-
-
-
-
 🧱 Tech Stack
 Backend: FastAPI
 
@@ -15,6 +11,11 @@ Database: MySQL with SQLAlchemy ORM
 
 Frontend: PyQt6 (Desktop GUI)
 
-System Tools: winget, winreg
+System Tools: winget, winreg, paramiko
 
 Language: Python 3.10+
+
+Architecture:
+
+![new architecture](https://github.com/user-attachments/assets/eaee7273-597b-4e93-8aa0-40337bbcac20)
+

@@ -25,7 +25,7 @@ def register_user(db: Session, username: str, password: str):
     if user:
         raise Exception("Username already exists.")
 
-    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    hashed_password = pwd_context.hash(password)
 
     new_user = User(
         username=username,

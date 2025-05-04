@@ -65,9 +65,9 @@ def list_applications(db: Session = Depends(get_db)):
     return crud.get_all_apps(db)
 
 # patch info for specific app
-@router.get("/patches/{app_id}")
-def show_patch_info(app_id: int, db: Session = Depends(get_db) ):
-    return crud.get_patch_info(db, app_id)
+# @router.get("/patches/{app_id}")
+# def show_patch_info(app_id: int, db: Session = Depends(get_db) ):
+#     return crud.get_patch_info(db, app_id)
 
 @router.post("/scan")
 def manual_scan(db: Session = Depends(get_db), user: User = Depends(get_current_admin)):

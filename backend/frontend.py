@@ -406,10 +406,28 @@ class ApplicationsTab(QWidget):
             }
         """)
         scan_btn.clicked.connect(self.scan_for_updates)
+
+        update_all_btn = QPushButton("Update All")
+        update_all_btn.setIcon(QIcon.fromTheme("system-software-update"))
+        update_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+        """)
+        update_all_btn.clicked.connect(self.update_all_applications)
         
         header.addWidget(title)
         header.addStretch()
         header.addWidget(scan_btn)
+        header.addWidget(update_all_btn)
         
         # Applications table
         self.applications_table = QTableWidget()
@@ -438,6 +456,25 @@ class ApplicationsTab(QWidget):
         layout.addWidget(self.applications_table)
         
         self.setLayout(layout)
+    
+    def update_all_applications(self):
+        try:
+            # First scan for updates
+            self.scan_for_updates()
+            
+            # Then update all
+            response = requests.post(
+                "http://localhost:8000/update-all",
+                headers={"Authorization": f"Bearer {self.main_window.token}"}
+            )
+            
+            if response.status_code == 200:
+                QMessageBox.information(self, "Success", "All applications updated successfully!")
+                self.load_applications()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to update all applications")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
     
     def load_applications(self):
         try:
@@ -817,6 +854,10 @@ class DevicesTab(QWidget):
     
     def scan_device(self, device_id):
         try:
+            # Show progress dialog
+            self.scan_dialog = ScanProgressDialog(self)
+            self.scan_dialog.show()
+            
             response = requests.post(
                 f"http://localhost:8000/devices/{device_id}/scan",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
@@ -824,12 +865,35 @@ class DevicesTab(QWidget):
             
             if response.status_code == 200:
                 result = response.json()
+                # Create a formatted message
+                message = f"Scan completed on {result['device_info']['hostname']}\n"
+                message += f"OS: {result['scan_results']['os'].capitalize()}\n\n"
+                
+                # Installed software
+                message += "Installed Software:\n"
+                if isinstance(result['scan_results']['installed_software'], list):
+                    for app in result['scan_results']['installed_software'][:5]:  # Show first 5
+                        message += f"- {app.get('name', 'Unknown')} ({app.get('version', 'Unknown')})\n"
+                elif isinstance(result['scan_results']['installed_software'], dict):
+                    for name, version in list(result['scan_results']['installed_software'].items())[:5]:
+                        message += f"- {name} ({version})\n"
+                
+                # Available updates
+                message += "\nAvailable Updates:\n"
+                if isinstance(result['scan_results']['available_updates'], list):
+                    for update in result['scan_results']['available_updates'][:5]:
+                        message += f"- {update.get('name', 'Unknown')} (Current: {update.get('current', '?')}, Available: {update.get('available', '?')})\n"
+                elif isinstance(result['scan_results']['available_updates'], dict):
+                    for name, info in list(result['scan_results']['available_updates'].items())[:5]:
+                        if isinstance(info, dict):
+                            message += f"- {name} (Current: {info.get('current', '?')}, Available: {info.get('available', '?')})\n"
+                        else:
+                            message += f"- {name} (Available: {info})\n"
+                
                 QMessageBox.information(
                     self, 
                     "Scan Results", 
-                    f"Scan completed on {result['device_info']['hostname']}\n\n"
-                    f"OS: {result['os']}\n\n"
-                    f"Results:\n{result['scan_results']}"
+                    message
                 )
                 self.load_devices()
             else:
@@ -837,6 +901,9 @@ class DevicesTab(QWidget):
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
+        finally:
+            if hasattr(self, 'scan_dialog'):
+                self.scan_dialog.close()
     
     def perform_device_scan(self, device_id):
         try:
@@ -1150,6 +1217,7 @@ class MainWindow(QMainWindow):
         # Devices tab
         self.devices_tab = DevicesTab(self)
         self.content_stack.addWidget(self.devices_tab)
+        self.devices_btn.setVisible(False)
         
         # Add to main layout
         layout.addWidget(self.nav_bar)
@@ -1165,6 +1233,16 @@ class MainWindow(QMainWindow):
     
     def show_main_window(self):
         self.stacked_widget.setCurrentWidget(self.dashboard)
+        # Check if user is admin and show/hide devices button
+        try:
+            response = requests.get(
+                "http://localhost:8000/admin-dashboard",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+            is_admin = response.status_code == 200
+            self.devices_btn.setVisible(is_admin)
+        except:
+            self.devices_btn.setVisible(False)
         self.show_applications_tab()
     
     def show_applications_tab(self):

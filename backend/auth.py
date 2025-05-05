@@ -30,7 +30,7 @@ def register_user(db: Session, username: str, password: str):
     new_user = User(
         username=username,
          hashed_password=hashed_password,
-        is_admin=True  # Automatically make them admin
+        is_admin=False  # Automatically make them admin
     )
     db.add(new_user)
     db.commit()

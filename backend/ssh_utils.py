@@ -3,16 +3,64 @@ import os
 import logging
 from pathlib import Path
 from typing import Dict
+import socket
 
 logger = logging.getLogger(__name__)
 
 class SSHManager:
     def __init__(self, device):
-        if not device:
-            raise ValueError("Device cannot be None")
         self.device = device
         self.client = None
+        self.shell = None  # For interactive shell
         self.connected = False
+
+    def start_interactive_shell(self):
+        """Start an interactive shell session"""
+        if not self.connect():
+            return False
+        
+        try:
+            self.shell = self.client.invoke_shell()
+            self.shell.settimeout(1)  # Small timeout for non-blocking reads
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start shell: {str(e)}")
+            return False
+        
+    def send_shell_command(self, command):
+        """Send command to interactive shell"""
+        if not self.shell:
+            return {"error": "No active shell session"}
+        
+        try:
+            self.shell.send(command + "\n")
+            return {"status": "command_sent"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def read_shell_output(self, timeout=0.1):
+        """Read output from interactive shell"""
+        if not self.shell:
+            return {"error": "No active shell session"}
+        
+        output = ""
+        try:
+            while True:
+                if self.shell.recv_ready():
+                    output += self.shell.recv(4096).decode('utf-8', errors='ignore')
+                else:
+                    break
+        except socket.timeout:
+            pass
+            
+        return {"output": output}
+
+    def close_interactive_shell(self):
+        """Close the interactive shell"""
+        if self.shell:
+            self.shell.close()
+            self.shell = None
+
         
     def connect(self) -> bool:
         try:

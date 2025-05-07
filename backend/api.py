@@ -17,6 +17,8 @@ import re
 import logging
 import json
 import platform
+from fastapi import WebSocket, WebSocketDisconnect, status
+import asyncio
 
 
 router= APIRouter()
@@ -658,31 +660,6 @@ def get_raw_scan_output(
     finally:
         ssh.disconnect()
 
-@router.post("/devices/{device_id}/test-connection")
-def test_device_connection(
-    device_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    device = db.query(Device).filter(Device.id == device_id).first()
-    if not device:
-        raise HTTPException(404, detail="Device not found")
-    
-    try:
-        ssh = SSHManager(device)
-        result = ssh.execute_command("echo 'Connection test successful'")
-        
-        if "error" in result:
-            raise HTTPException(400, detail=f"Connection failed: {result['error']}")
-            
-        return {
-            "status": "success",
-            "hostname": device.hostname,
-            "ip_address": device.ip_address,
-            "output": result["output"]
-        }
-    except Exception as e:
-        raise HTTPException(500, detail=f"Connection test error: {str(e)}")
     
 @router.post("/test-winget")
 def test_winget():
@@ -717,24 +694,7 @@ def test_winget():
     except Exception as e:
         return {"error": str(e)}
     
-@router.get("/verify-package/{app_id}")
-def verify_package(app_id: int, db: Session = Depends(get_db)):
-    app = db.query(Application).filter(Application.app_id == app_id).first()
-    if not app:
-        raise HTTPException(404, "Application not found")
-    
-    result = subprocess.run(
-        f"winget list --id {app.package_identifier}",
-        capture_output=True,
-        text=True,
-        shell=True
-    )
-    
-    return {
-        "package_id": app.package_identifier,
-        "exists": "No installed package" not in result.stdout,
-        "output": result.stdout
-    }
+
 
 
 
@@ -828,5 +788,50 @@ def update_by_name(
         raise HTTPException(408, "Update timed out")
     except Exception as e:
         raise HTTPException(500, f"Update failed: {str(e)}")
+    
+@router.post("/devices/{device_id}/command")
+def send_command(device_id: int, command: str):
+    return {"output": f"Mock output for: {command}"}
 
 
+
+
+@router.websocket("/ws/device/{device_id}/terminal")
+async def websocket_terminal(
+    websocket: WebSocket,
+    device_id: int,
+    db: Session = Depends(get_db)
+):
+    await websocket.accept()
+    device = db.query(Device).filter(Device.id == device_id).first()
+
+    if not device:
+        await websocket.send_text("Device not found")
+        await websocket.close()
+        return
+
+    ssh = SSHManager(device)
+    if not ssh.connect():
+        await websocket.send_text("SSH connection failed")
+        await websocket.close()
+        return
+
+    try:
+        while True:
+            command = await websocket.receive_text()
+            result = ssh.execute_windows_command(command)
+            output = result.get("output", "")
+            error = result.get("error", "")
+            
+            if error:
+                await websocket.send_text(f"[ERROR] {error}")
+            elif output.strip():
+                await websocket.send_text(output.strip())
+            else:
+                await websocket.send_text("[No output received]")
+
+    except WebSocketDisconnect:
+        ssh.disconnect()
+    except Exception as e:
+        await websocket.send_text(f"[ERROR] {str(e)}")
+        ssh.disconnect()

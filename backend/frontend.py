@@ -699,6 +699,30 @@ class DevicesTab(QWidget):
                 padding: 5px;
             }
         """)
+
+                # Scan results table
+        self.scan_results_table = QTableWidget()
+        self.scan_results_table.setColumnCount(3)
+        self.scan_results_table.setHorizontalHeaderLabels(["Name", "Current Version", "Available Version"])
+        self.scan_results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.scan_results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.scan_results_table.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #bdc3c7;
+                border-radius: 5px;
+                font-size: 14px;
+                background-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #34495e;
+                color: white;
+                padding: 5px;
+                border: none;
+            }
+        """)
+
+        layout.addWidget(self.scan_results_table)
+
         
         layout.addLayout(header)
         layout.addWidget(self.devices_table)
@@ -775,6 +799,24 @@ class DevicesTab(QWidget):
                     btn_layout.addWidget(connect_btn)
                     btn_layout.addWidget(scan_btn)
                     btn_widget.setLayout(btn_layout)
+
+                    update_btn = QPushButton("Update All")
+                    update_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #2ecc71;
+                            color: white;
+                            border: none;
+                            padding: 5px 10px;
+                            border-radius: 3px;
+                            font-size: 12px;
+                        }
+                        QPushButton:hover {
+                            background-color: #27ae60;
+                        }
+                    """)
+                    update_btn.clicked.connect(lambda _, device_id=device["id"]: self.update_all_on_device(device_id))
+
+                    btn_layout.addWidget(update_btn)
                     
                     self.devices_table.setCellWidget(row, 3, btn_widget)
                     
@@ -857,6 +899,23 @@ class DevicesTab(QWidget):
         
         dialog.setLayout(layout)
         dialog.exec()
+
+    def update_all_on_device(self, device_id):
+        try:
+            response = requests.post(
+                f"http://localhost:8000/devices/{device_id}/update-all",
+                headers={"Authorization": f"Bearer {self.main_window.token}"}
+            )
+
+            if response.status_code == 200:
+                output = response.json().get("output", "")
+                QMessageBox.information(self, "Success", f"Update completed:\n\n{output}")
+            else:
+                error = response.json().get("detail", "Update failed")
+                QMessageBox.warning(self, "Error", error)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update apps: {str(e)}")
     
     def add_device(self, dialog):
         hostname = self.hostname_input.text()
@@ -895,54 +954,40 @@ class DevicesTab(QWidget):
     
     def scan_device(self, device_id):
         try:
-            # Show progress dialog
             self.scan_dialog = ScanProgressDialog(self)
             self.scan_dialog.show()
-            
-            # Perform the scan
+
             response = requests.post(
                 f"http://localhost:8000/devices/{device_id}/scan",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
-                
-                # Create a formatted message
-                message = f"Scan completed on {result['device_info']['hostname']}\n"
-                message += f"OS: {result['device_info']['os'].capitalize()}\n\n"
-                
-                # Installed software
-                message += "Installed Software:\n"
-                if isinstance(result['scan_results']['installed_software'], list):
-                    for app in result['scan_results']['installed_software'][:5]:  # Show first 5
-                        message += f"- {app.get('name', 'Unknown')} ({app.get('version', 'Unknown')})\n"
-                elif isinstance(result['scan_results']['installed_software'], dict):
-                    for name, version in list(result['scan_results']['installed_software'].items())[:5]:
-                        message += f"- {name} ({version})\n"
-                
-                # Available updates
-                message += "\nAvailable Updates:\n"
-                if isinstance(result['scan_results']['available_updates'], list):
-                    for update in result['scan_results']['available_updates'][:5]:
-                        message += f"- {update.get('name', 'Unknown')} (Current: {update.get('current_version', '?')}, Available: {update.get('available_version', '?')})\n"
-                elif isinstance(result['scan_results']['available_updates'], dict):
-                    for name, info in list(result['scan_results']['available_updates'].items())[:5]:
-                        if isinstance(info, dict):
-                            message += f"- {name} (Current: {info.get('current', '?')}, Available: {info.get('available', '?')})\n"
-                        else:
-                            message += f"- {name} (Available: {info})\n"
-                
-                QMessageBox.information(
-                    self, 
-                    "Scan Results", 
-                    message
-                )
+                device_info = result.get("device", {})
+                scan_results = result.get("scan_results", {})
+                updates = scan_results.get("available_updates", [])
+
+                # Prepare table
+                self.scan_results_table.setRowCount(len(updates))
+                self.scan_results_table.setColumnCount(3)
+                self.scan_results_table.setHorizontalHeaderLabels(["Name", "Current Version", "Available Version"])
+
+                for row, update in enumerate(updates):
+                    name = update.get("name", "Unknown")
+                    current = update.get("Current_version", "?")
+                    available = update.get("Available Update", "?")
+
+                    self.scan_results_table.setItem(row, 0, QTableWidgetItem(name))
+                    self.scan_results_table.setItem(row, 1, QTableWidgetItem(current))
+                    self.scan_results_table.setItem(row, 2, QTableWidgetItem(available))
+
             else:
                 QMessageBox.warning(self, "Error", "Failed to scan device")
-                
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
+
         finally:
             if hasattr(self, 'scan_dialog'):
                 self.scan_dialog.close()

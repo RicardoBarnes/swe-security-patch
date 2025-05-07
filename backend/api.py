@@ -43,12 +43,19 @@ def parse_windows_scan(output: str) -> dict:
         return {"error": "Empty response from remote", "raw_output": output}
     
     try:
-        data = json.loads(output.strip())
+        output = output.strip()
+        if not output.startswith("{"):
+            return {
+                "error": "Output is not JSON",
+                "raw_output": output
+            }
+        data = json.loads(output)
     except json.JSONDecodeError as e:
         return {
             "error": f"JSON decode error: {str(e)}",
-            "raw_output": output.strip()
+            "raw_output": output
         }
+
     
     # Handle PowerShell error case
     if "Error" in data:
@@ -378,56 +385,43 @@ def run_remote_command(
 
 
 @router.post("/devices/{device_id}/scan")
-def run_remote_scan(
-    device_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def run_remote_scan(device_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
-        raise HTTPException(404, detail="Device not found")
+        raise HTTPException(status_code=404, detail="Device not found")
 
     ssh = SSHManager(device)
+    if not ssh.connect():
+        raise HTTPException(status_code=500, detail="SSH connection failed")
+
     try:
-        # Connect to device
-        if not ssh.connect():
-            raise HTTPException(500, detail="SSH connection failed")
-        
-        # Detect OS
-        os_type, debug_info = ssh.detect_remote_os()
-        if not os_type:
-            raise HTTPException(500, detail=f"Could not detect remote OS. Debug: {debug_info}")
-        
-        # Get the appropriate scan command
-        scan_commands = get_scan_commands()
-        cmd_info = scan_commands.get(os_type.lower())
-        if not cmd_info:
-            raise HTTPException(400, detail=f"Unsupported OS: {os_type}")
-            
-        # Execute scan command
-        result = cmd_info["handler"](ssh, cmd_info["command"])
+        script_path = str(Path(__file__).parent / "remote_scanner.py")
+        result = ssh.transfer_and_execute(script_path)
+
         if "error" in result:
-            raise HTTPException(500, detail=f"Scan failed: {result['error']}")
-            
-        # Parse results
-        parsed = parse_results_based_on_os(os_type, result["output"])
-        
-        # Return structured results
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        output = result.get("output", "")
+        if not output.strip().startswith("{"):
+            raise HTTPException(status_code=500, detail="Remote output is not valid JSON")
+
+        parsed = json.loads(output)
         return {
             "status": "success",
-            "device_info": {
-                "id": device.id,
+            "device": {
                 "hostname": device.hostname,
-                "ip_address": device.ip_address,
-                "os": os_type
+                "ip_address": device.ip_address
             },
-            "scan_results": parsed
+            "scan_results": {
+                "status": parsed.get("status", "unknown"),
+                "os": parsed.get("os", "unknown"),
+                "installed_software": parsed.get("installed_apps", []),
+                "available_updates": parsed.get("updates", [])
+            }
         }
-        
-    except HTTPException:
-        raise
+    
     except Exception as e:
-        raise HTTPException(500, detail=f"Scan failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Scan failed: {str(e)}")
     finally:
         ssh.disconnect()
 
@@ -509,54 +503,33 @@ def list_devices(db: Session = Depends(get_db)):
     ]
 
 @router.post("/devices/{device_id}/update-all")
-def update_all_apps(
-    device_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Bulk update all applications"""
+def update_all_apps(device_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
-        raise HTTPException(404, "Device not found")
+        raise HTTPException(status_code=404, detail="Device not found")
 
     ssh = SSHManager(device)
-    
+    if not ssh.connect():
+        raise HTTPException(status_code=500, detail="SSH connection failed")
+
     try:
-        # Get all updatable apps
-        apps = db.query(Application).filter(
-            Application.device_id == device_id,
-            Application.available_update != "None"
-        ).all()
-        
-        if not apps:
-            return {"status": "success", "message": "No updates available"}
+        # Update all apps via winget
+        result = ssh.run_command("winget upgrade --all --accept-source-agreements --accept-package-agreements")
 
-        # Build update command
-        package_ids = [app.package_identifier for app in apps]
-        update_cmd = f"winget upgrade --id {' --id '.join(package_ids)} --silent"
-        
-        # Execute
-        result = ssh.execute_windows_command(update_cmd)
-        if "error" in result:
-            raise HTTPException(500, f"Update failed: {result['error']}")
-
-        # Update database
-        for app in apps:
-            app.current_version = app.available_update
-            app.available_update = "None"
-        db.commit()
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
 
         return {
             "status": "success",
-            "updated": len(apps),
+            "message": "All available updates installed.",
             "output": result.get("output", "")
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        db.rollback()
-        raise HTTPException(500, f"Update failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+    finally:
+        ssh.disconnect()
+
     
 @router.post("/update-all")
 def update_all_applications(

@@ -13,6 +13,7 @@ class SSHManager:
         self.client = None
         self.shell = None  # For interactive shell
         self.connected = False
+        self.ssh = None
 
     def start_interactive_shell(self):
         """Start an interactive shell session"""
@@ -99,6 +100,18 @@ class SSHManager:
                 pass
         self.client = None
         self.connected = False
+
+    def run_command(self, command: str):
+        if not self.connected or not self.client:
+            raise Exception("SSH connection not established")
+        try:
+            stdin, stdout, stderr = self.client.exec_command(command)
+            output = stdout.read().decode().strip()
+            error = stderr.read().decode().strip()
+            return {"output": output, "error": error}
+        except Exception as e:
+            return {"error": f"Command execution failed: {str(e)}"}
+
     
     def execute_command(self, command: str, close_after: bool = False) -> Dict[str, str]:
         if not self.connected and not self.connect():
@@ -120,33 +133,35 @@ class SSHManager:
                 self.disconnect()
     
     def transfer_and_execute(self, local_script_path: str) -> Dict[str, str]:
-        """Windows-compatible file transfer and execution"""
+        """Transfers and executes remote_scanner.py on the device"""
         try:
             if not self.connect():
                 return {"error": "SSH connection failed"}
 
-            # Windows temp path
-            remote_path = "C:\\Windows\\Temp\\remote_scanner.py"
-            
-            # Convert to absolute path
+            # ✅ Use a non-restricted folder like C:\Users\Public
+            remote_path = "C:\\Users\\Public\\remote_scanner.py"
+
+            # ✅ Get full local path
             script_path = Path(local_script_path).absolute()
-            
-            # SFTP transfer
+
+            # ✅ Transfer file to remote device
             with self.client.open_sftp() as sftp:
                 sftp.put(str(script_path), remote_path)
-            
-            # Windows execution command
-            exec_cmd = f'python "{remote_path}"'
+
+            # ✅ Use PowerShell to run the script using `py`
+            exec_cmd = f'powershell -Command "python \\"{remote_path}\\""'
             result = self.execute_windows_command(exec_cmd)
-            
-            # Cleanup
-            self.execute_windows_command(f'del /f "{remote_path}"', close_after=True)
-            
+
+            # Optional: Clean up after (you can remove this if debugging)
+            self.execute_windows_command(f'del /f \\"{remote_path}\\"', close_after=True)
+
             return result
         except Exception as e:
-            return {"error": f"Transfer/execute failed: {str(e)}"}
+            return {"error": f"Transfer or execution failed: {str(e)}"}
         finally:
             self.disconnect()
+
+
 
     def execute_windows_command(self, command: str, close_after: bool = False) -> Dict[str, str]:
         """More reliable Windows command execution with timeout"""
@@ -170,6 +185,15 @@ class SSHManager:
         finally:
             if close_after:
                 self.disconnect()
+
+    # def run_command(self, command: str):
+    #     try:
+    #         stdin, stdout, stderr = self.ssh.exec_command(command)
+    #         output = stdout.read().decode()
+    #         error = stderr.read().decode()
+    #         return {"output": output.strip(), "error": error.strip()}
+    #     except Exception as e:
+    #         return {"error": str(e)}
 
     def detect_remote_os(self):
         detection_sequence = [

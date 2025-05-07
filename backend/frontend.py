@@ -7,6 +7,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QFont, QColor, QIcon
 from PyQt6.QtCore import Qt
 import requests
+from PyQt6.QtWebSockets import QWebSocket
+from PyQt6.QtCore import QUrl
+from PyQt6.QtWidgets import QTextEdit
+import json 
+from PyQt6.QtNetwork import QAbstractSocket
+
 
 class LoginWindow(QWidget):
     def __init__(self, parent=None):
@@ -406,10 +412,28 @@ class ApplicationsTab(QWidget):
             }
         """)
         scan_btn.clicked.connect(self.scan_for_updates)
+
+        update_all_btn = QPushButton("Update All")
+        update_all_btn.setIcon(QIcon.fromTheme("system-software-update"))
+        update_all_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+        """)
+        update_all_btn.clicked.connect(self.update_all_applications)
         
         header.addWidget(title)
         header.addStretch()
         header.addWidget(scan_btn)
+        header.addWidget(update_all_btn)
         
         # Applications table
         self.applications_table = QTableWidget()
@@ -438,6 +462,25 @@ class ApplicationsTab(QWidget):
         layout.addWidget(self.applications_table)
         
         self.setLayout(layout)
+    
+    def update_all_applications(self):
+        try:
+            # First scan for updates
+            self.scan_for_updates()
+            
+            # Then update all
+            response = requests.post(
+                "http://localhost:8000/update-all",
+                headers={"Authorization": f"Bearer {self.main_window.token}"}
+            )
+            
+            if response.status_code == 200:
+                QMessageBox.information(self, "Success", "All applications updated successfully!")
+                self.load_applications()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to update all applications")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
     
     def load_applications(self):
         try:
@@ -522,17 +565,52 @@ class ApplicationsTab(QWidget):
     
     def update_application(self, app_id):
         try:
+            # First get the app name from the table
+            row = -1
+            for i in range(self.applications_table.rowCount()):
+                if int(self.applications_table.item(i, 1).text()) == app_id:
+                    row = i
+                    break
+            
+            if row == -1:
+                QMessageBox.warning(self, "Error", "Application not found in table")
+                return
+                
+            app_name = self.applications_table.item(row, 0).text()
+            
+            # Show progress dialog
+            progress = ScanProgressDialog(self)
+            progress.label.setText(f"Updating {app_name}...")
+            progress.show()
+            
+            # Call the update-by-name endpoint
             response = requests.post(
-                f"http://localhost:8000/update/{app_id}",
+                f"http://localhost:8000/update-by-name/{app_name}",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
             )
+            
+            progress.close()
             
             if response.status_code == 200:
                 QMessageBox.information(self, "Success", "Application updated successfully!")
                 self.load_applications()
             else:
-                error = response.json().get("error", "Failed to update application")
-                QMessageBox.warning(self, "Error", error)
+                error = response.json().get("detail", {})
+                if isinstance(error, dict):
+                    # Handle structured error response
+                    error_msg = error.get("error", "Update failed")
+                    solution = error.get("solution", "")
+                    if solution:
+                        error_msg += f"\n\n{solution}"
+                else:
+                    error_msg = str(error)
+                
+                QMessageBox.warning(
+                    self, 
+                    "Update Failed", 
+                    error_msg,
+                    QMessageBox.StandardButton.Ok
+                )
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
@@ -817,6 +895,11 @@ class DevicesTab(QWidget):
     
     def scan_device(self, device_id):
         try:
+            # Show progress dialog
+            self.scan_dialog = ScanProgressDialog(self)
+            self.scan_dialog.show()
+            
+            # Perform the scan
             response = requests.post(
                 f"http://localhost:8000/devices/{device_id}/scan",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
@@ -824,19 +907,45 @@ class DevicesTab(QWidget):
             
             if response.status_code == 200:
                 result = response.json()
+                
+                # Create a formatted message
+                message = f"Scan completed on {result['device_info']['hostname']}\n"
+                message += f"OS: {result['device_info']['os'].capitalize()}\n\n"
+                
+                # Installed software
+                message += "Installed Software:\n"
+                if isinstance(result['scan_results']['installed_software'], list):
+                    for app in result['scan_results']['installed_software'][:5]:  # Show first 5
+                        message += f"- {app.get('name', 'Unknown')} ({app.get('version', 'Unknown')})\n"
+                elif isinstance(result['scan_results']['installed_software'], dict):
+                    for name, version in list(result['scan_results']['installed_software'].items())[:5]:
+                        message += f"- {name} ({version})\n"
+                
+                # Available updates
+                message += "\nAvailable Updates:\n"
+                if isinstance(result['scan_results']['available_updates'], list):
+                    for update in result['scan_results']['available_updates'][:5]:
+                        message += f"- {update.get('name', 'Unknown')} (Current: {update.get('current_version', '?')}, Available: {update.get('available_version', '?')})\n"
+                elif isinstance(result['scan_results']['available_updates'], dict):
+                    for name, info in list(result['scan_results']['available_updates'].items())[:5]:
+                        if isinstance(info, dict):
+                            message += f"- {name} (Current: {info.get('current', '?')}, Available: {info.get('available', '?')})\n"
+                        else:
+                            message += f"- {name} (Available: {info})\n"
+                
                 QMessageBox.information(
                     self, 
                     "Scan Results", 
-                    f"Scan completed on {result['device_info']['hostname']}\n\n"
-                    f"OS: {result['os']}\n\n"
-                    f"Results:\n{result['scan_results']}"
+                    message
                 )
-                self.load_devices()
             else:
                 QMessageBox.warning(self, "Error", "Failed to scan device")
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
+        finally:
+            if hasattr(self, 'scan_dialog'):
+                self.scan_dialog.close()
     
     def perform_device_scan(self, device_id):
         try:
@@ -930,96 +1039,70 @@ class DeviceWindow(QWidget):
         self.device_info.setLayout(info_layout)
         
         # Command section
-        command_group = QFrame()
-        command_group.setFrameShape(QFrame.Shape.StyledPanel)
-        command_group.setStyleSheet("""
-            QFrame {
-                background-color: #f8f9fa;
-                border-radius: 5px;
-                padding: 15px;
-            }
-        """)
+        self.terminal = PowerShellTerminal(self.device_id, self)
+        layout.addWidget(self.terminal)
         
-        command_layout = QVBoxLayout()
-        command_layout.setSpacing(10)
+        # run_btn = QPushButton("Run Command")
+        # run_btn.setStyleSheet("""
+        #     QPushButton {
+        #         background-color: #3498db;
+        #         color: white;
+        #         border: none;
+        #         padding: 8px 15px;
+        #         border-radius: 5px;
+        #         font-size: 14px;
+        #     }
+        #     QPushButton:hover {
+        #         background-color: #2980b9;
+        #     }
+        # """)
+        # run_btn.clicked.connect(self.run_command)
         
-        command_title = QLabel("Run Command")
-        command_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        # self.command_output = QLabel()
+        # self.command_output.setWordWrap(True)
+        # self.command_output.setStyleSheet("""
+        #     QLabel {
+        #         background-color: white;
+        #         border: 1px solid #bdc3c7;
+        #         border-radius: 5px;
+        #         padding: 10px;
+        #         font-family: monospace;
+        #         font-size: 12px;
+        #     }
+        # """)
         
-        self.command_input = QLineEdit()
-        self.command_input.setPlaceholderText("Enter command to execute on device")
-        self.command_input.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                font-size: 14px;
-            }
-        """)
+        # command_layout.addWidget(command_title)
+        # command_layout.addWidget(self.command_input)
+        # command_layout.addWidget(run_btn)
+        # command_layout.addWidget(QLabel("Output:"))
+        # command_layout.addWidget(self.command_output)
         
-        run_btn = QPushButton("Run Command")
-        run_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 8px 15px;
-                border-radius: 5px;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
-        run_btn.clicked.connect(self.run_command)
+        # command_group.setLayout(command_layout)
         
-        self.command_output = QLabel()
-        self.command_output.setWordWrap(True)
-        self.command_output.setStyleSheet("""
-            QLabel {
-                background-color: white;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                padding: 10px;
-                font-family: monospace;
-                font-size: 12px;
-            }
-        """)
-        
-        command_layout.addWidget(command_title)
-        command_layout.addWidget(self.command_input)
-        command_layout.addWidget(run_btn)
-        command_layout.addWidget(QLabel("Output:"))
-        command_layout.addWidget(self.command_output)
-        
-        command_group.setLayout(command_layout)
-        
-        layout.addLayout(header)
-        layout.addWidget(self.device_info)
-        layout.addWidget(command_group)
+        # layout.addLayout(header)
+        # layout.addWidget(self.device_info)
+        # layout.addWidget(command_group)
         
         self.setLayout(layout)
     
     def load_device_info(self):
         try:
-            response = requests.get("http://localhost:8000/devices")
+            # Get device info to display in title
+            if self.main_window.mock_mode:
+                response = requests.get("http://localhost:8000/mock/devices")
+            else:
+                response = requests.get(
+                    "http://localhost:8000/devices",
+                    headers={"Authorization": f"Bearer {self.main_window.token}"}
+                )
             
             if response.status_code == 200:
                 devices = response.json()
                 device = next((d for d in devices if d["id"] == self.device_id), None)
-                
                 if device:
-                    self.title.setText(f"Device: {device['hostname']}")
-                    self.hostname_label.setText(device["hostname"])
-                    self.ip_label.setText(device["ip_address"])
-                else:
-                    QMessageBox.warning(self, "Error", "Device not found")
-                    
-            else:
-                QMessageBox.warning(self, "Error", "Failed to load device info")
-                
+                    self.title.setText(f"Terminal - {device['hostname']} ({device['ip_address']})")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
+            print(f"Error loading device info: {e}")
     
     def run_command(self):
         command = self.command_input.text()
@@ -1050,6 +1133,7 @@ class MainWindow(QMainWindow):
         self.token = None
         self.setup_ui()
         self.show_login_window()
+        self.mock_mode = False
         
     def setup_ui(self):
         self.setWindowTitle("Patch Management Dashboard")
@@ -1150,6 +1234,7 @@ class MainWindow(QMainWindow):
         # Devices tab
         self.devices_tab = DevicesTab(self)
         self.content_stack.addWidget(self.devices_tab)
+        self.devices_btn.setVisible(False)
         
         # Add to main layout
         layout.addWidget(self.nav_bar)
@@ -1165,6 +1250,16 @@ class MainWindow(QMainWindow):
     
     def show_main_window(self):
         self.stacked_widget.setCurrentWidget(self.dashboard)
+        # Check if user is admin and show/hide devices button
+        try:
+            response = requests.get(
+                "http://localhost:8000/admin-dashboard",
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+            is_admin = response.status_code == 200
+            self.devices_btn.setVisible(is_admin)
+        except:
+            self.devices_btn.setVisible(False)
         self.show_applications_tab()
     
     def show_applications_tab(self):
@@ -1202,6 +1297,23 @@ class MainWindow(QMainWindow):
         self.stacked_widget.setCurrentWidget(self.dashboard)
         self.content_stack.setCurrentWidget(self.devices_tab)
         self.devices_tab.load_devices()
+
+    def show_device_window(self, device_id):
+        # Remove any existing device window
+        for i in range(self.stacked_widget.count()):
+            widget = self.stacked_widget.widget(i)
+            if isinstance(widget, DeviceWindow):
+                self.stacked_widget.removeWidget(widget)
+                widget.deleteLater()
+                break
+                
+        # Create and show new device window with proper device_id
+        device_window = DeviceWindow(device_id, self)
+        self.stacked_widget.addWidget(device_window)
+        self.stacked_widget.setCurrentWidget(device_window)
+
+    def return_to_devices_tab(self):
+        self.stacked_widget.setCurrentWidget(self.dashboard)
     
     def set_token(self, token):
         self.token = token
@@ -1209,6 +1321,8 @@ class MainWindow(QMainWindow):
     def logout(self):
         self.token = None
         self.show_login_window()
+
+    
 
 class ScanProgressDialog(QDialog):
     def __init__(self, parent=None):
@@ -1230,7 +1344,60 @@ class ScanProgressDialog(QDialog):
         
         self.setLayout(layout)
 
+class PowerShellTerminal(QWidget):
+    def __init__(self, device_id, parent=None):
+        super().__init__(parent)
+        self.device_id = device_id
+        self.main_window = parent.main_window
+        self.socket = QWebSocket()
+        self.setup_ui()
+        self.setup_connections()
+        self.connect_to_terminal()
 
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+
+        # Terminal output area
+        self.terminal_output = QTextEdit()
+        self.terminal_output.setReadOnly(True)
+        self.terminal_output.setStyleSheet("background-color: black; color: lightgreen; font-family: monospace;")
+        layout.addWidget(self.terminal_output)
+
+        # Command input area
+        command_layout = QHBoxLayout()
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Enter command and press Enter...")
+        self.command_input.returnPressed.connect(self.send_command)
+        command_layout.addWidget(QLabel("PS>"))
+        command_layout.addWidget(self.command_input)
+
+        layout.addLayout(command_layout)
+        self.setLayout(layout)
+
+    def setup_connections(self):
+        self.socket.textMessageReceived.connect(self.display_output)
+        self.socket.errorOccurred.connect(self.handle_error)
+
+    def connect_to_terminal(self):
+        try:
+            url = QUrl(f"ws://localhost:8000/ws/device/{self.device_id}/terminal")
+            self.socket.open(url)
+        except Exception as e:
+            self.terminal_output.append(f"[ERROR] Failed to connect: {str(e)}")
+
+    def send_command(self):
+        command = self.command_input.text()
+        if command and self.socket.state() == QAbstractSocket.SocketState.ConnectedState:
+            self.terminal_output.append(f"> {command}")  # Echo command locally
+            self.socket.sendTextMessage(command)
+            self.command_input.clear()
+
+    def display_output(self, text):
+        self.terminal_output.append(text)
+
+    def handle_error(self, error):
+        self.terminal_output.append(f"[ERROR] WebSocket error: {error}")
 
 
 

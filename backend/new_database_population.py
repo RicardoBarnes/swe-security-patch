@@ -3,9 +3,10 @@ import re
 import datetime
 import platform
 import plistlib
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session as SessionType
 from sqlalchemy import create_engine
 from models import Application, Base  # Import from your models file
+from models import Device
 
 # --- Setup SQLAlchemy Session ---
 engine = create_engine('mysql+pymysql://root:Sterben1999!@localhost/Patch_Management')
@@ -173,6 +174,19 @@ def sync_to_database(installed_apps, winget_upgrades):
             session.add(new_app)
 
     session.commit()
+
+def process_remote_scan(db: SessionType, device_id: int, scan_data: dict):
+    """Process results from remote scanner"""
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise ValueError("Device not found")
+    
+    # Example processing - adapt to your needs
+    for app_name, app_data in scan_data.get("installed_apps", {}).items():
+        # Update or create application records
+        pass
+        
+    db.commit()
 
 # --- Run Script ---
 # if __name__ == "__main__":

@@ -3,116 +3,173 @@ import os
 import logging
 from pathlib import Path
 from typing import Dict
+import socket
 
 logger = logging.getLogger(__name__)
 
 class SSHManager:
     def __init__(self, device):
         self.device = device
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.client = None
+        self.shell = None  # For interactive shell
+        self.connected = False
+
+    def start_interactive_shell(self):
+        """Start an interactive shell session"""
+        if not self.connect():
+            return False
+        
+        try:
+            self.shell = self.client.invoke_shell()
+            self.shell.settimeout(1)  # Small timeout for non-blocking reads
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start shell: {str(e)}")
+            return False
+        
+    def send_shell_command(self, command):
+        """Send command to interactive shell"""
+        if not self.shell:
+            return {"error": "No active shell session"}
+        
+        try:
+            self.shell.send(command + "\n")
+            return {"status": "command_sent"}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def read_shell_output(self, timeout=0.1):
+        """Read output from interactive shell"""
+        if not self.shell:
+            return {"error": "No active shell session"}
+        
+        output = ""
+        try:
+            while True:
+                if self.shell.recv_ready():
+                    output += self.shell.recv(4096).decode('utf-8', errors='ignore')
+                else:
+                    break
+        except socket.timeout:
+            pass
+            
+        return {"output": output}
+
+    def close_interactive_shell(self):
+        """Close the interactive shell"""
+        if self.shell:
+            self.shell.close()
+            self.shell = None
+
         
     def connect(self) -> bool:
         try:
+            if self.connected and self.client:
+                return True  # Already connected
+                
+            if not all([self.device.ip_address, self.device.ssh_username]):
+                raise ValueError("Missing connection parameters")
+                
+            # Close any existing connection
+            self.disconnect()
+                
+            self.client = paramiko.SSHClient()
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self.client.connect(
                 hostname=self.device.ip_address,
                 username=self.device.ssh_username,
                 password=self.device.ssh_password,
-                timeout=10
+                timeout=10,
+                banner_timeout=20,
+                allow_agent=False,
+                look_for_keys=False
             )
+            self.connected = True
             return True
         except Exception as e:
-            logger.error(f"SSH connection failed to {self.device.hostname}: {str(e)}")
+            logger.error(f"SSH connection failed to {getattr(self.device, 'hostname', 'unknown')}: {str(e)}")
+            self.connected = False
             return False
     
-    def execute_command(self, command: str) -> Dict[str, str]:
-        if not self.connect():
-            return {"error": "Connection failed"}
+    def disconnect(self):
+        if self.client:
+            try:
+                self.client.close()
+            except:
+                pass
+        self.client = None
+        self.connected = False
+    
+    def execute_command(self, command: str, close_after: bool = False) -> Dict[str, str]:
+        if not self.connected and not self.connect():
+            return {"error": "SSH connection failed"}
             
         try:
-            # For Windows, wrap commands in PowerShell Start-Process for elevation
-            if any(cmd in command.lower() for cmd in ['winget', 'choco', 'msiexec']):
-                command = f"powershell Start-Process -Verb RunAs -Wait -FilePath cmd -ArgumentList '/c {command}'"
-            
-            stdin, stdout, stderr = self.client.exec_command(command)
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=30)
+            exit_status = stdout.channel.recv_exit_status()
             output = stdout.read().decode().strip()
             error = stderr.read().decode().strip()
-        
-            if error:
-                return {"error": error}
+            
+            if exit_status != 0 or error:
+                return {"error": error or f"Command failed with status {exit_status}"}
             return {"output": output}
-            
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Command execution failed: {str(e)}"}
         finally:
-            self.client.close()
+            if close_after:
+                self.disconnect()
     
-    def transfer_and_execute(self, local_script: str, remote_path: str = "/tmp/") -> Dict[str, str]:
-        """Improved version with absolute path handling"""
-        # Convert to absolute path
-        script_path = Path(local_script).absolute()
-        
-        # Verify file exists
-        if not script_path.exists():
-            error_msg = f"Script not found at {script_path}"
-            logger.error(error_msg)
-            return {"error": error_msg}
-            
-        if not self.connect():
-            return {"error": "Connection failed"}
-            
+    def transfer_and_execute(self, local_script_path: str) -> Dict[str, str]:
+        """Windows-compatible file transfer and execution"""
         try:
-            sftp = self.client.open_sftp()
-            remote_file = f"{remote_path}{script_path.name}"  # Uses just the filename
+            if not self.connect():
+                return {"error": "SSH connection failed"}
+
+            # Windows temp path
+            remote_path = "C:\\Windows\\Temp\\remote_scanner.py"
             
-            logger.info(f"Transferring {script_path} to {self.device.hostname}:{remote_file}")
-            sftp.put(str(script_path), remote_file)
-            sftp.chmod(remote_file, 0o755)  # Make executable
+            # Convert to absolute path
+            script_path = Path(local_script_path).absolute()
             
-            # Execute with Python 3 (or python on Windows)
-            result = self.execute_command(f"python3 {remote_file}")
+            # SFTP transfer
+            with self.client.open_sftp() as sftp:
+                sftp.put(str(script_path), remote_path)
+            
+            # Windows execution command
+            exec_cmd = f'python "{remote_path}"'
+            result = self.execute_windows_command(exec_cmd)
             
             # Cleanup
-            self.execute_command(f"rm {remote_file}")
+            self.execute_windows_command(f'del /f "{remote_path}"', close_after=True)
+            
             return result
-            
         except Exception as e:
-            logger.error(f"Transfer/execute failed: {str(e)}")
-            return {"error": str(e)}
+            return {"error": f"Transfer/execute failed: {str(e)}"}
         finally:
-            self.client.close()
+            self.disconnect()
 
-    def execute_windows_command(self, command: str) -> Dict[str, str]:
-        """Special handling for Windows commands requiring elevation"""
-        if not self.connect():
-            return {"error": "Connection failed"}
-        
+    def execute_windows_command(self, command: str, close_after: bool = False) -> Dict[str, str]:
+        """More reliable Windows command execution with timeout"""
         try:
-            # Create a temporary PowerShell script
-            script = f"""
-            $tempFile = [System.IO.Path]::GetTempFileName()
-            try {{
-                Start-Process -Verb RunAs -Wait -FilePath 'cmd.exe' -ArgumentList '/c {command} > $tempFile 2>&1'
-                Get-Content $tempFile -Raw
-            }} finally {{
-                Remove-Item $tempFile -ErrorAction SilentlyContinue
-            }}
-            """
-            
-            stdin, stdout, stderr = self.client.exec_command(
-                f"powershell -Command \"{script}\""
-            )
-            output = stdout.read().decode().strip()
-            error = stderr.read().decode().strip()
-            
-            if error:
-                return {"error": error}
-            return {"output": output}
+            if not self.connected and not self.connect():
+                return {"error": "SSH connection failed"}
                 
+            # Set timeout and combine streams
+            full_cmd = f"powershell -Command \"{command} 2>&1 | Out-String\""
+            stdin, stdout, stderr = self.client.exec_command(full_cmd, timeout=30)
+            
+            # Wait with timeout
+            exit_status = stdout.channel.recv_exit_status()
+            output = stdout.read().decode('utf-8', errors='replace').strip()
+            
+            if exit_status != 0:
+                return {"error": output}
+            return {"output": output}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Command execution failed: {str(e)}"}
         finally:
-            self.client.close()
+            if close_after:
+                self.disconnect()
 
     def detect_remote_os(self):
         detection_sequence = [

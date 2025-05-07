@@ -559,17 +559,52 @@ class ApplicationsTab(QWidget):
     
     def update_application(self, app_id):
         try:
+            # First get the app name from the table
+            row = -1
+            for i in range(self.applications_table.rowCount()):
+                if int(self.applications_table.item(i, 1).text()) == app_id:
+                    row = i
+                    break
+            
+            if row == -1:
+                QMessageBox.warning(self, "Error", "Application not found in table")
+                return
+                
+            app_name = self.applications_table.item(row, 0).text()
+            
+            # Show progress dialog
+            progress = ScanProgressDialog(self)
+            progress.label.setText(f"Updating {app_name}...")
+            progress.show()
+            
+            # Call the update-by-name endpoint
             response = requests.post(
-                f"http://localhost:8000/update/{app_id}",
+                f"http://localhost:8000/update-by-name/{app_name}",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
             )
+            
+            progress.close()
             
             if response.status_code == 200:
                 QMessageBox.information(self, "Success", "Application updated successfully!")
                 self.load_applications()
             else:
-                error = response.json().get("error", "Failed to update application")
-                QMessageBox.warning(self, "Error", error)
+                error = response.json().get("detail", {})
+                if isinstance(error, dict):
+                    # Handle structured error response
+                    error_msg = error.get("error", "Update failed")
+                    solution = error.get("solution", "")
+                    if solution:
+                        error_msg += f"\n\n{solution}"
+                else:
+                    error_msg = str(error)
+                
+                QMessageBox.warning(
+                    self, 
+                    "Update Failed", 
+                    error_msg,
+                    QMessageBox.StandardButton.Ok
+                )
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to connect to server: {str(e)}")
@@ -858,6 +893,7 @@ class DevicesTab(QWidget):
             self.scan_dialog = ScanProgressDialog(self)
             self.scan_dialog.show()
             
+            # Perform the scan
             response = requests.post(
                 f"http://localhost:8000/devices/{device_id}/scan",
                 headers={"Authorization": f"Bearer {self.main_window.token}"}
@@ -865,9 +901,10 @@ class DevicesTab(QWidget):
             
             if response.status_code == 200:
                 result = response.json()
+                
                 # Create a formatted message
                 message = f"Scan completed on {result['device_info']['hostname']}\n"
-                message += f"OS: {result['scan_results']['os'].capitalize()}\n\n"
+                message += f"OS: {result['device_info']['os'].capitalize()}\n\n"
                 
                 # Installed software
                 message += "Installed Software:\n"
@@ -882,7 +919,7 @@ class DevicesTab(QWidget):
                 message += "\nAvailable Updates:\n"
                 if isinstance(result['scan_results']['available_updates'], list):
                     for update in result['scan_results']['available_updates'][:5]:
-                        message += f"- {update.get('name', 'Unknown')} (Current: {update.get('current', '?')}, Available: {update.get('available', '?')})\n"
+                        message += f"- {update.get('name', 'Unknown')} (Current: {update.get('current_version', '?')}, Available: {update.get('available_version', '?')})\n"
                 elif isinstance(result['scan_results']['available_updates'], dict):
                     for name, info in list(result['scan_results']['available_updates'].items())[:5]:
                         if isinstance(info, dict):
@@ -895,7 +932,6 @@ class DevicesTab(QWidget):
                     "Scan Results", 
                     message
                 )
-                self.load_devices()
             else:
                 QMessageBox.warning(self, "Error", "Failed to scan device")
                 

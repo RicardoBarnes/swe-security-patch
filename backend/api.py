@@ -37,19 +37,14 @@ def parse_results_based_on_os(os_type: str, output: str) -> dict:
 
 def parse_windows_scan(output: str) -> dict:
     """Parse Windows scan output with better error handling"""
-    # First try to parse as JSON
+    if not output.strip():
+        return {"error": "Empty response from remote", "raw_output": output}
+    
     try:
         data = json.loads(output.strip())
-    except json.JSONDecodeError:
-        # If JSON parsing fails, check if it's a winget error message
-        if "winget is not recognized" in output:
-            return {
-                "error": "winget command not found",
-                "suggestion": "Install Windows Package Manager from Microsoft Store",
-                "raw_output": output.strip()
-            }
+    except json.JSONDecodeError as e:
         return {
-            "error": "Invalid JSON output from remote",
+            "error": f"JSON decode error: {str(e)}",
             "raw_output": output.strip()
         }
     
@@ -62,37 +57,37 @@ def parse_windows_scan(output: str) -> dict:
     
     # Parse installed applications
     installed_apps = []
-    if "Apps" in data:
-        for app in data["Apps"] if isinstance(data["Apps"], list) else []:
-            if app.get("DisplayName"):
-                installed_apps.append({
-                    "name": app["DisplayName"],
+    if "InstalledApps" in data:
+        if isinstance(data["InstalledApps"], list):
+            installed_apps = [
+                {
+                    "name": app.get("DisplayName", "Unknown"),
                     "version": app.get("DisplayVersion", "Unknown"),
                     "publisher": app.get("Publisher", "Unknown"),
                     "install_date": app.get("InstallDate", "Unknown")
-                })
+                }
+                for app in data["InstalledApps"]
+            ]
     
     # Parse winget upgrades
     available_updates = []
-    winget_output = data.get("Winget", "")
-    if winget_output:
-        for line in winget_output.splitlines():
-            if line.strip() and not any(x in line for x in ["---", "Name", "Version"]):
-                parts = re.split(r'\s{2,}', line.strip())
-                if len(parts) >= 5:
-                    available_updates.append({
-                        "name": parts[0],
-                        "package_id": parts[1],
-                        "current_version": parts[2],
-                        "available_version": parts[3]
-                    })
+    if "WingetUpdates" in data and isinstance(data["WingetUpdates"], list):
+        available_updates = [
+            {
+                "name": update.get("Name", "Unknown"),
+                "package_id": update.get("PackageId", "Unknown"),
+                "current_version": update.get("CurrentVersion", "Unknown"),
+                "available_version": update.get("AvailableVersion", "Unknown")
+            }
+            for update in data["WingetUpdates"]
+        ]
     
     return {
         "installed_software": installed_apps,
         "available_updates": available_updates,
         "metadata": {
             "source": "Windows Registry + winget",
-            "timestamp": datetime.datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
     }
 
@@ -156,35 +151,45 @@ def parse_mac_scan(output):
     }
 
 def get_scan_commands():
-    """Returns the OS-specific scan commands and handlers"""
-    return {
+     """Returns the OS-specific scan commands and handlers"""
+     return {
         "windows": {
             "command": """
             $ErrorActionPreference = 'Stop'
             try {
-                # Get installed apps
+                # Get installed apps from registry
                 $apps = Get-ItemProperty HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | 
                         Where-Object { $_.DisplayName -ne $null } |
-                        Select-Object DisplayName, DisplayVersion, Publisher, InstallDate
+                        Select-Object DisplayName, DisplayVersion, Publisher, InstallDate |
+                        ConvertTo-Json -Depth 5 -Compress
                 
-                # Get winget upgrades
-                $wingetOutput = & {
-                    $oldErrorAction = $ErrorActionPreference
-                    $ErrorActionPreference = 'SilentlyContinue'
-                    winget upgrade | Out-String
-                    $ErrorActionPreference = $oldErrorAction
+                # Get winget upgrades if available
+                $wingetUpdates = @()
+                if (Get-Command winget -ErrorAction SilentlyContinue) {
+                    $wingetOutput = winget upgrade | Out-String
+                    $wingetUpdates = $wingetOutput -split "`n" | 
+                                    Where-Object { $_ -match "^\S" -and $_ -notmatch "Name|---" } |
+                                    ForEach-Object {
+                                        $parts = $_ -split "\s{2,}"
+                                        @{
+                                            Name = $parts[0]
+                                            PackageId = $parts[1]
+                                            CurrentVersion = $parts[2]
+                                            AvailableVersion = $parts[3]
+                                        }
+                                    }
                 }
                 
-                # Prepare clean JSON output
-                [PSCustomObject]@{
-                    Apps = @($apps)
-                    Winget = $wingetOutput
+                # Return structured data
+                @{
+                    InstalledApps = ($apps | ConvertFrom-Json)
+                    WingetUpdates = $wingetUpdates
                 } | ConvertTo-Json -Depth 10 -Compress
             }
             catch {
-                [PSCustomObject]@{
+                @{
                     Error = $_.Exception.Message
-                    RawOutput = $wingetOutput
+                    RawOutput = $_
                 } | ConvertTo-Json -Depth 3 -Compress
             }
             """,
@@ -246,101 +251,83 @@ def manual_scan(db: Session = Depends(get_db), user: User = Depends(get_current_
 
 
 @router.post("/update/{app_id}")
-def update_application(
-    app_id: int, 
-    db: Session = Depends(get_db), 
-    user: User = Depends(get_current_user)
-):
+def update_application(app_id: int, db: Session = Depends(get_db)):
     app = db.query(Application).filter(Application.app_id == app_id).first()
     if not app:
-        raise HTTPException(status_code=404, detail="Application not found")
+        raise HTTPException(404, "Application not found")
 
     try:
-        # Detect OS and use appropriate command
-        os_type = platform.system().lower()
+        # 1. Verify package exists
+        list_cmd = f"winget list --id {app.package_identifier}"
+        list_result = subprocess.run(
+            list_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            timeout=30
+        )
         
-        if os_type == "windows":
-            command = [
-                "winget", "upgrade", "--id", app.package_identifier,
-                "--silent", "--accept-package-agreements", "--accept-source-agreements"
-            ]
-            result = subprocess.run(command, capture_output=True, text=True, shell=True, timeout=300)
-            
-            if result.returncode != 0:
-                raise HTTPException(status_code=400, detail=result.stderr or result.stdout or "Unknown error")
-                
-            # Check if already up to date
-            if "no available upgrade found" in result.stdout.lower():
-                app.available_update = "No update available"
-                db.commit()
-                return {"status": "success", "message": "Already up to date"}
-            
-            # Get updated version
-            list_cmd = ["winget", "list", "--id", app.package_identifier]
-            list_result = subprocess.run(list_cmd, capture_output=True, text=True, shell=True, timeout=30)
-            
-            if list_result.returncode == 0:
-                for line in list_result.stdout.splitlines():
-                    if app.package_identifier.lower() in line.lower():
-                        parts = re.split(r'\s{2,}', line.strip())
-                        if len(parts) >= 3:
-                            app.current_version = parts[1]
-                            break
-            
-        elif os_type == "linux":
-            command = ["sudo", "apt", "install", "--only-upgrade", app.package_identifier, "-y"]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode != 0:
-                raise HTTPException(status_code=400, detail=result.stderr or result.stdout or "Unknown error")
-            
-            # Get updated version
-            list_cmd = ["apt", "list", "--installed", app.package_identifier]
-            list_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=30)
-            
-            if list_result.returncode == 0:
-                for line in list_result.stdout.splitlines():
-                    if app.package_identifier in line:
-                        version = line.split()[1]
-                        app.current_version = version
-                        break
-            
-        elif os_type == "darwin":
-            command = ["brew", "upgrade", app.package_identifier]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode != 0:
-                raise HTTPException(status_code=400, detail=result.stderr or result.stdout or "Unknown error")
-            
-            # Get updated version
-            list_cmd = ["brew", "info", app.package_identifier]
-            list_result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=30)
-            
-            if list_result.returncode == 0:
-                for line in list_result.stdout.splitlines():
-                    if app.package_identifier in line and "stable" in line:
-                        version = line.split()[1]
-                        app.current_version = version
-                        break
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported operating system")
+        if "No installed package found" in list_result.stdout:
+            raise HTTPException(
+                404,
+                detail=f"Package not found. Verify the ID matches exactly.\n"
+                      f"Try running manually: {list_cmd}\n"
+                      f"Output: {list_result.stdout}"
+            )
 
-        # Update database
+        # 2. Execute upgrade (with progress capture)
+        upgrade_cmd = (
+            f"winget upgrade --id {app.package_identifier} "
+            "--silent --accept-package-agreements --accept-source-agreements"
+        )
+        
+        upgrade_result = subprocess.run(
+            upgrade_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            timeout=600  # 10 minute timeout
+        )
+
+        # 3. Verify results
+        if upgrade_result.returncode != 0:
+            raise HTTPException(
+                500,
+                detail=f"Upgrade failed (code {upgrade_result.returncode}):\n"
+                      f"{upgrade_result.stderr or upgrade_result.stdout}"
+            )
+
+        # 4. Get updated version
+        version_match = re.search(
+            rf"{re.escape(app.package_identifier)}\s+([\d.]+)",
+            list_result.stdout,
+            re.IGNORECASE
+        )
+        
+        if not version_match:
+            raise HTTPException(
+                500,
+                detail=f"Version verification failed. Could not parse version from:\n"
+                      f"{list_result.stdout}"
+            )
+
+        new_version = version_match.group(1)
+        app.current_version = new_version
         app.available_update = "No update available"
         app.last_checked = datetime.utcnow()
         db.commit()
 
         return {
             "status": "success",
-            "message": f"Application {app.app_name} updated successfully",
-            "new_version": app.current_version
+            "new_version": new_version,
+            "message": f"{app.app_name} updated successfully"
         }
 
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=408, detail="Update timed out")
+        raise HTTPException(408, "Update timed out after 10 minutes")
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+        raise HTTPException(500, f"Update failed: {str(e)}")
 
 
 
@@ -400,7 +387,7 @@ def run_remote_scan(
 
     ssh = SSHManager(device)
     try:
-        # All operations will reuse the same connection
+        # Connect to device
         if not ssh.connect():
             raise HTTPException(500, detail="SSH connection failed")
         
@@ -409,22 +396,38 @@ def run_remote_scan(
         if not os_type:
             raise HTTPException(500, detail=f"Could not detect remote OS. Debug: {debug_info}")
         
-        # Run scan
+        # Get the appropriate scan command
         scan_commands = get_scan_commands()
-        cmd_info = scan_commands[os_type.lower()]
+        cmd_info = scan_commands.get(os_type.lower())
+        if not cmd_info:
+            raise HTTPException(400, detail=f"Unsupported OS: {os_type}")
+            
+        # Execute scan command
         result = cmd_info["handler"](ssh, cmd_info["command"])
-        
         if "error" in result:
             raise HTTPException(500, detail=f"Scan failed: {result['error']}")
             
-        # Parse and return results
+        # Parse results
         parsed = parse_results_based_on_os(os_type, result["output"])
-        return {"status": "success", "data": parsed}
         
+        # Return structured results
+        return {
+            "status": "success",
+            "device_info": {
+                "id": device.id,
+                "hostname": device.hostname,
+                "ip_address": device.ip_address,
+                "os": os_type
+            },
+            "scan_results": parsed
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, detail=f"Scan failed: {str(e)}")
     finally:
-        ssh.disconnect()  # Ensure connection is always closed
+        ssh.disconnect()
 
 @router.post("/devices/{device_id}/update/{app_id}")
 def update_remote_application(
@@ -680,12 +683,150 @@ def test_device_connection(
         }
     except Exception as e:
         raise HTTPException(500, detail=f"Connection test error: {str(e)}")
+    
+@router.post("/test-winget")
+def test_winget():
+    try:
+        # Test both listing and upgrade capabilities
+        list_result = subprocess.run(
+            ["winget", "list", "--id", "Microsoft.WindowsTerminal"],
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        
+        upgrade_result = subprocess.run(
+            ["winget", "upgrade", "--id", "Microsoft.WindowsTerminal", "--dry-run"],
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        
+        return {
+            "list_output": list_result.stdout,
+            "upgrade_dry_run": upgrade_result.stdout,
+            "errors": {
+                "list": list_result.stderr,
+                "upgrade": upgrade_result.stderr
+            },
+            "return_codes": {
+                "list": list_result.returncode,
+                "upgrade": upgrade_result.returncode
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
+@router.get("/verify-package/{app_id}")
+def verify_package(app_id: int, db: Session = Depends(get_db)):
+    app = db.query(Application).filter(Application.app_id == app_id).first()
+    if not app:
+        raise HTTPException(404, "Application not found")
+    
+    result = subprocess.run(
+        f"winget list --id {app.package_identifier}",
+        capture_output=True,
+        text=True,
+        shell=True
+    )
+    
+    return {
+        "package_id": app.package_identifier,
+        "exists": "No installed package" not in result.stdout,
+        "output": result.stdout
+    }
 
 
 
 
+@router.post("/update-by-name/{app_name}")
+def update_by_name(
+    app_name: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+):
+    try:
+        # 1. First try winget source
+        search_cmd = f"winget list --name \"{app_name}\" --exact"
+        search_result = subprocess.run(
+            search_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            timeout=30
+        )
 
+        # 2. If not found, try msstore source
+        if "No installed package found" in search_result.stdout:
+            search_cmd = f"winget list --name \"{app_name}\" --exact --source msstore"
+            search_result = subprocess.run(
+                search_cmd,
+                capture_output=True,
+                text=True,
+                shell=True,
+                timeout=30
+            )
 
-#  i need route for scanning for updates manually using winget --upgrade (/scan)
-# route to update a specific app based on id/name using winget upgrade --id <app> (/update/{id})
+        # 3. Parse package info
+        match = re.search(
+            r"^" + re.escape(app_name) + r"\s+(\S+)\s+([\d.]+)\s+([\d.]+)\s+(\w+)",
+            search_result.stdout,
+            re.MULTILINE
+        )
+
+        if not match:
+            raise HTTPException(
+                404,
+                detail={
+                    "error": f"Application '{app_name}' not found",
+                    "solution": f"Try manual search: winget search \"{app_name}\""
+                }
+            )
+
+        package_id = match.group(1)
+        source = match.group(4)
+
+        # 4. Prepare upgrade command
+        upgrade_cmd = [
+            "winget", "upgrade",
+            "--id", package_id,
+            "--source", source,
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements"
+        ]
+
+        # 5. Run as admin (requires FastAPI to be run as admin)
+        creation_flags = 0
+        if platform.system() == "Windows":
+            creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_CONSOLE
+
+        upgrade_result = subprocess.run(
+            upgrade_cmd,
+            capture_output=True,
+            text=True,
+            shell=True,
+            timeout=600,
+            creationflags=creation_flags
+        )
+
+        # 6. Handle results
+        if upgrade_result.returncode != 0:
+            error_detail = {
+                "error": "Upgrade failed",
+                "returncode": upgrade_result.returncode,
+                "solution": "Try these steps:\n"
+                          "1. Run FastAPI as Administrator\n"
+                          "2. Verify package exists: winget list --id " + package_id + "\n"
+                          "3. Try manual update: " + " ".join(upgrade_cmd)
+            }
+            raise HTTPException(500, detail=error_detail)
+
+        return {"status": "success", "message": f"{app_name} update completed"}
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(408, "Update timed out")
+    except Exception as e:
+        raise HTTPException(500, f"Update failed: {str(e)}")
+
 
